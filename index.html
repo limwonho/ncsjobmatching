@@ -1077,11 +1077,11 @@ textarea { resize: vertical; min-height: 100px; font-family: inherit; }
       <div id="company-dashboard">
         <div class="stats-row">
           <div class="stat-card" style="cursor:pointer;" onclick="showCompanySection('job-list')">
-            <div class="stat-val">12</div>
+            <div class="stat-val" id="dash-active-jobs">-</div>
             <div class="stat-label">진행중 공고</div>
           </div>
           <div class="stat-card" style="cursor:pointer;" onclick="showCompanySection('applicants')">
-            <div class="stat-val">247</div>
+            <div class="stat-val" id="dash-total-applicants">-</div>
             <div class="stat-label">총 지원자</div>
           </div>
           <div class="stat-card" style="cursor:pointer;" onclick="showCompanySection('results')">
@@ -1094,7 +1094,7 @@ textarea { resize: vertical; min-height: 100px; font-family: inherit; }
             </div>
           </div>
           <div class="stat-card" style="cursor:pointer;" onclick="showCompanySection('results')">
-            <div class="stat-val" style="color: var(--success);">23</div>
+            <div class="stat-val" id="dash-final-passed" style="color: var(--success);">-</div>
             <div class="stat-label">최종 합격</div>
           </div>
         </div>
@@ -1918,59 +1918,182 @@ function showCompanySection(section) {
   }
 }
 
-// DASHBOARD
-function renderDashboard() {
-  const recents = document.getElementById('recent-applicants');
-  recents.innerHTML = SAMPLE_APPLICANTS.slice(0, 3).map(a => `
-    <div class="applicant-row" onclick="openApplicantEval(${a.id})">
-      <div class="applicant-info">
-        <div class="applicant-avatar">${a.avatar}</div>
-        <div>
-          <div class="applicant-name">${a.name}</div>
-          <div class="applicant-ncs">${a.ncs} · ${a.unit}</div>
+// ─── 현재 지원자 데이터 소스 ───────────────────────────────────────
+let _dashData = null;
+function getApplicants() {
+  return (_dashData && _dashData.applicants && _dashData.applicants.length > 0)
+    ? _dashData.applicants
+    : SAMPLE_APPLICANTS;
+}
+
+// ─── Supabase 대시보드 데이터 로드 ────────────────────────────────
+async function loadDashboardData() {
+  const demo = {
+    activeJobs:      12,
+    totalApplicants: SAMPLE_APPLICANTS.length,
+    evalDone:        SAMPLE_APPLICANTS.filter(a => a.total > 0).length,
+    finalPassed:     SAMPLE_APPLICANTS.filter(a => a.status === 'passed').length,
+    applicants:      SAMPLE_APPLICANTS
+  };
+
+  if (!_supabase || !currentUser) return demo;
+
+  try {
+    // 현재 기업 ID 조회
+    const { data: co, error: coErr } = await _supabase
+      .from('companies').select('id').eq('user_id', currentUser.id).single();
+    if (coErr || !co) return demo;
+    const cid = co.id;
+
+    // 병렬 쿼리
+    const [activeJobsRes, totalAppRes, passedRes, evalDoneRes, recentRes] = await Promise.all([
+      // 진행중 공고
+      _supabase.from('jobs')
+        .select('id', { count: 'exact', head: true })
+        .eq('company_id', cid).eq('status', 'active'),
+      // 총 지원자
+      _supabase.from('applications')
+        .select('id, jobs!inner(company_id)', { count: 'exact', head: true })
+        .eq('jobs.company_id', cid),
+      // 최종 합격
+      _supabase.from('applications')
+        .select('id, jobs!inner(company_id)', { count: 'exact', head: true })
+        .eq('jobs.company_id', cid).eq('status', 'passed'),
+      // 역량 평가 완료
+      _supabase.from('evaluations')
+        .select('id', { count: 'exact', head: true })
+        .eq('company_id', cid).gt('ncs_total', 0),
+      // 최근 지원자 (평가 포함)
+      _supabase.from('applications')
+        .select(`
+          id, status, applied_at,
+          job_seekers ( id, name, ncs_category, ncs_detail ),
+          jobs!inner ( company_id, title ),
+          evaluations ( ncs_ratings, ncs_total, basic_ratings, basic_total )
+        `)
+        .eq('jobs.company_id', cid)
+        .order('applied_at', { ascending: false })
+        .limit(30)
+    ]);
+
+    // DB 데이터 → 내부 형식 변환
+    const applicants = (recentRes.data || []).map(row => {
+      const ev = Array.isArray(row.evaluations) ? row.evaluations[0] : row.evaluations;
+      return {
+        id:          row.id,
+        name:        row.job_seekers?.name || '(이름없음)',
+        avatar:      (row.job_seekers?.name || '?')[0],
+        ncs:         row.job_seekers?.ncs_category || '-',
+        unit:        row.job_seekers?.ncs_detail || '-',
+        status:      row.status,
+        date:        (row.applied_at || '').slice(0, 10).replace(/-/g, '.'),
+        ratings:     ev?.ncs_ratings || {},
+        total:       parseFloat(ev?.ncs_total) || 0,
+        basicRatings:ev?.basic_ratings || {},
+        basicTotal:  parseFloat(ev?.basic_total) || 0,
+      };
+    });
+
+    return {
+      activeJobs:      activeJobsRes.count  || 0,
+      totalApplicants: totalAppRes.count    || 0,
+      finalPassed:     passedRes.count      || 0,
+      evalDone:        evalDoneRes.count    || 0,
+      applicants:      applicants.length > 0 ? applicants : SAMPLE_APPLICANTS
+    };
+  } catch (err) {
+    console.error('대시보드 데이터 로드 오류:', err);
+    return { activeJobs:12, totalApplicants:SAMPLE_APPLICANTS.length,
+      evalDone: SAMPLE_APPLICANTS.filter(a=>a.total>0).length,
+      finalPassed: SAMPLE_APPLICANTS.filter(a=>a.status==='passed').length,
+      applicants: SAMPLE_APPLICANTS };
+  }
+}
+
+// DASHBOARD (async)
+async function renderDashboard() {
+  // 로딩 표시
+  ['dash-active-jobs','dash-total-applicants','dash-final-passed'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = '<span style="font-size:14px;opacity:0.5;">…</span>';
+  });
+
+  _dashData = await loadDashboardData();
+  const d = _dashData;
+
+  // 상단 카드 업데이트
+  const g = id => document.getElementById(id);
+  if (g('dash-active-jobs'))      g('dash-active-jobs').textContent      = d.activeJobs;
+  if (g('dash-total-applicants')) g('dash-total-applicants').textContent = d.totalApplicants;
+  if (g('dash-final-passed'))     g('dash-final-passed').textContent     = d.finalPassed;
+
+  const evalPct = d.totalApplicants > 0 ? Math.round(d.evalDone / d.totalApplicants * 100) : 0;
+  if (g('dash-eval-count')) g('dash-eval-count').textContent = `${d.evalDone} / ${d.totalApplicants}`;
+  if (g('dash-eval-bar'))   g('dash-eval-bar').style.width   = evalPct + '%';
+
+  // 최근 지원자 목록
+  const recents = g('recent-applicants');
+  if (recents) {
+    const list = d.applicants.slice(0, 3);
+    recents.innerHTML = list.length === 0
+      ? '<div style="text-align:center;padding:28px;color:var(--gray-400);">아직 지원자가 없습니다.</div>'
+      : list.map(a => `
+        <div class="applicant-row" onclick="openApplicantEval(${a.id})">
+          <div class="applicant-info">
+            <div class="applicant-avatar">${a.avatar}</div>
+            <div>
+              <div class="applicant-name">${a.name}</div>
+              <div class="applicant-ncs">${a.ncs} · ${a.unit}</div>
+            </div>
+          </div>
+          <div>
+            <div class="job-meta">
+              <span class="badge ${(STATUS_MAP[a.status]||{cls:'badge-gray'}).cls}">${(STATUS_MAP[a.status]||{label:a.status}).label}</span>
+              <span style="font-size:13px;color:var(--gray-400);">${a.date}</span>
+            </div>
+          </div>
+          <div>
+            ${a.total > 0
+              ? `<span style="font-size:20px;font-weight:800;color:var(--primary);">${a.total.toFixed(1)}</span><span style="font-size:12px;color:var(--gray-400);">/5</span>`
+              : '<span style="font-size:13px;color:var(--gray-400);">미평가</span>'}
+          </div>
         </div>
-      </div>
-      <div>
-        <div class="job-meta">
-          <span class="badge ${STATUS_MAP[a.status].cls}">${STATUS_MAP[a.status].label}</span>
-          <span style="font-size: 13px; color: var(--gray-400);">${a.date}</span>
+      `).join('');
+  }
+
+  // NCS 분야별 지원 현황 차트
+  const chartEl = g('ncs-stats-chart');
+  if (chartEl) {
+    let chartData;
+    const isRealData = _supabase && currentUser && d.applicants !== SAMPLE_APPLICANTS;
+    if (isRealData && d.applicants.length > 0) {
+      const cnt = {};
+      d.applicants.forEach(a => { const k = a.ncs||'기타'; cnt[k]=(cnt[k]||0)+1; });
+      const COLORS = ['#3b82f6','#10b981','#f59e0b','#8b5cf6','#ef4444'];
+      chartData = Object.entries(cnt).sort((a,b)=>b[1]-a[1]).slice(0,5)
+        .map(([name,count],i) => ({ name, count, color: COLORS[i] }));
+    } else {
+      chartData = [
+        { name: '정보통신',   count: 98, color: '#3b82f6' },
+        { name: '경영·회계', count: 56, color: '#10b981' },
+        { name: '문화·디자인',count: 34, color: '#f59e0b' },
+        { name: '기계',       count: 28, color: '#8b5cf6' },
+        { name: '금융·보험', count: 21, color: '#ef4444' },
+      ];
+    }
+    const max = Math.max(...chartData.map(d => d.count), 1);
+    chartEl.innerHTML = chartData.map(d => `
+      <div style="display:grid;grid-template-columns:100px 1fr 50px;align-items:center;gap:12px;margin-bottom:14px;">
+        <div style="font-size:13px;font-weight:600;color:var(--gray-700);">${d.name}</div>
+        <div class="progress-bar">
+          <div class="progress-fill" style="width:${(d.count/max)*100}%;background:${d.color};"></div>
         </div>
+        <div style="font-size:13px;font-weight:700;color:var(--gray-700);text-align:right;">${d.count}명</div>
       </div>
-      <div>
-        ${a.total > 0 ? `<span style="font-size: 20px; font-weight: 800; color: var(--primary);">${a.total.toFixed(1)}</span><span style="font-size: 12px; color: var(--gray-400);">/5</span>` : '<span style="font-size: 13px; color: var(--gray-400);">미평가</span>'}
-      </div>
-    </div>
-  `).join('');
+    `).join('');
+  }
 
-  const chartEl = document.getElementById('ncs-stats-chart');
-  const chartData = [
-    { name: '정보통신', count: 98, color: '#3b82f6' },
-    { name: '경영·회계', count: 56, color: '#10b981' },
-    { name: '문화·디자인', count: 34, color: '#f59e0b' },
-    { name: '기계', count: 28, color: '#8b5cf6' },
-    { name: '금융·보험', count: 21, color: '#ef4444' },
-  ];
-  const max = Math.max(...chartData.map(d => d.count));
-  chartEl.innerHTML = chartData.map(d => `
-    <div style="display:grid; grid-template-columns: 100px 1fr 50px; align-items: center; gap: 12px; margin-bottom: 14px;">
-      <div style="font-size: 13px; font-weight: 600; color: var(--gray-700);">${d.name}</div>
-      <div class="progress-bar">
-        <div class="progress-fill" style="width: ${(d.count/max)*100}%; background: ${d.color};"></div>
-      </div>
-      <div style="font-size: 13px; font-weight: 700; color: var(--gray-700); text-align: right;">${d.count}명</div>
-    </div>
-  `).join('');
-
-  // 역량 평가 완료 수 동적 업데이트
-  const evalDone  = SAMPLE_APPLICANTS.filter(a => a.total > 0).length;
-  const evalTotal = SAMPLE_APPLICANTS.length;
-  const evalPct   = Math.round(evalDone / evalTotal * 100);
-  const evalCountEl = document.getElementById('dash-eval-count');
-  const evalBarEl   = document.getElementById('dash-eval-bar');
-  if (evalCountEl) evalCountEl.textContent = `${evalDone} / ${evalTotal}`;
-  if (evalBarEl)   evalBarEl.style.width   = evalPct + '%';
-
-  // ★ 새로 추가된 역량 평가 패널들
+  // 역량 평가 패널들
   renderEvalOverview();
   renderEvalNCSAvg();
   renderEvalBasicAvg();
@@ -1982,20 +2105,21 @@ function renderEvalOverview() {
   const el = document.getElementById('eval-overview');
   if (!el) return;
 
-  const total      = SAMPLE_APPLICANTS.length;
-  const evaluated  = SAMPLE_APPLICANTS.filter(a => a.total > 0);
-  const withBasic  = SAMPLE_APPLICANTS.filter(a => a.basicTotal > 0);
-  const pct        = Math.round(evaluated.length / total * 100);
+  const ALL      = getApplicants();
+  const total      = ALL.length;
+  const evaluated  = ALL.filter(a => a.total > 0);
+  const withBasic  = ALL.filter(a => a.basicTotal > 0);
+  const pct        = total > 0 ? Math.round(evaluated.length / total * 100) : 0;
 
   const avgNCS  = evaluated.length  ? (evaluated.reduce((s,a)=>s+a.total,0) / evaluated.length).toFixed(2) : '-';
   const avgBasic= withBasic.length  ? (withBasic.reduce((s,a)=>s+a.basicTotal,0) / withBasic.length).toFixed(2) : '-';
   const avgComb = evaluated.length  ? (evaluated.reduce((s,a)=>s+((a.total/5)*60+(a.basicTotal/7)*40),0)/evaluated.length).toFixed(1) : '-';
 
   const stCounts = {
-    pending:   SAMPLE_APPLICANTS.filter(a=>a.status==='pending').length,
-    reviewing: SAMPLE_APPLICANTS.filter(a=>a.status==='reviewing').length,
-    passed:    SAMPLE_APPLICANTS.filter(a=>a.status==='passed').length,
-    failed:    SAMPLE_APPLICANTS.filter(a=>a.status==='failed').length,
+    pending:   ALL.filter(a=>a.status==='pending').length,
+    reviewing: ALL.filter(a=>a.status==='reviewing').length,
+    passed:    ALL.filter(a=>a.status==='passed').length,
+    failed:    ALL.filter(a=>a.status==='failed').length,
   };
 
   el.innerHTML = `
@@ -2061,7 +2185,7 @@ function renderEvalOverview() {
 function renderEvalNCSAvg() {
   const el = document.getElementById('eval-ncs-avg');
   if (!el) return;
-  const evaluated = SAMPLE_APPLICANTS.filter(a => a.total > 0);
+  const evaluated = getApplicants().filter(a => a.total > 0);
   if (!evaluated.length) {
     el.innerHTML = '<div style="text-align:center;padding:24px;color:var(--gray-400);font-size:13px;">아직 평가 데이터가 없습니다.<br><br><button class="btn btn-sm btn-blue" onclick="showCompanySection(\'applicants\')">평가 시작하기</button></div>';
     return;
@@ -2107,7 +2231,7 @@ function renderEvalNCSAvg() {
 function renderEvalBasicAvg() {
   const el = document.getElementById('eval-basic-avg');
   if (!el) return;
-  const evaluated = SAMPLE_APPLICANTS.filter(a => a.basicTotal > 0);
+  const evaluated = getApplicants().filter(a => a.basicTotal > 0);
   if (!evaluated.length) {
     el.innerHTML = '<div style="text-align:center;padding:24px;color:var(--gray-400);font-size:13px;">아직 평가 데이터가 없습니다.<br><br><button class="btn btn-sm btn-blue" onclick="showCompanySection(\'applicants\')">평가 시작하기</button></div>';
     return;
@@ -2151,7 +2275,7 @@ function renderEvalBasicAvg() {
 function renderEvalPending() {
   const el = document.getElementById('eval-pending');
   if (!el) return;
-  const pending = SAMPLE_APPLICANTS.filter(a => a.total === 0);
+  const pending = getApplicants().filter(a => a.total === 0);
 
   if (!pending.length) {
     el.innerHTML = `
@@ -2229,7 +2353,12 @@ function renderJobList() {
 // APPLICANT LIST
 function renderApplicantList() {
   const el = document.getElementById('applicant-list-content');
-  el.innerHTML = SAMPLE_APPLICANTS.map(a => `
+  const list = getApplicants();
+  if (!list.length) {
+    el.innerHTML = '<div style="text-align:center;padding:40px;color:var(--gray-400);">아직 지원자가 없습니다.</div>';
+    return;
+  }
+  el.innerHTML = list.map(a => `
     <div class="applicant-row" onclick="openApplicantEval(${a.id})">
       <div class="applicant-info">
         <div class="applicant-avatar">${a.avatar}</div>
@@ -2240,12 +2369,14 @@ function renderApplicantList() {
       </div>
       <div>
         <div class="job-meta">
-          <span class="badge ${STATUS_MAP[a.status].cls}">${STATUS_MAP[a.status].label}</span>
-          <span style="font-size: 13px; color: var(--gray-400);">${a.date} 지원</span>
+          <span class="badge ${(STATUS_MAP[a.status]||{cls:'badge-gray'}).cls}">${(STATUS_MAP[a.status]||{label:a.status}).label}</span>
+          <span style="font-size:13px;color:var(--gray-400);">${a.date} 지원</span>
         </div>
       </div>
-      <div style="display:flex; align-items:center; gap: 8px;">
-        ${a.total > 0 ? `<span style="font-size: 20px; font-weight: 800; color: var(--primary);">${a.total.toFixed(1)}</span><span style="font-size: 12px; color: var(--gray-400);">/5</span>` : '<span style="font-size: 13px; color: var(--gray-400);">미평가</span>'}
+      <div style="display:flex;align-items:center;gap:8px;">
+        ${a.total > 0
+          ? `<span style="font-size:20px;font-weight:800;color:var(--primary);">${a.total.toFixed(1)}</span><span style="font-size:12px;color:var(--gray-400);">/5</span>`
+          : '<span style="font-size:13px;color:var(--gray-400);">미평가</span>'}
         <button class="btn btn-sm btn-blue" style="margin-left:8px;" onclick="event.stopPropagation(); openApplicantEval(${a.id})">평가하기</button>
       </div>
     </div>
@@ -2254,7 +2385,7 @@ function renderApplicantList() {
 
 // OPEN APPLICANT EVAL MODAL
 function openApplicantEval(id) {
-  const a = SAMPLE_APPLICANTS.find(x => x.id === id);
+  const a = getApplicants().find(x => x.id === id);
   if (!a) return;
   currentEvalApplicant = a;
   currentRatings = { ...a.ratings };
@@ -2482,44 +2613,102 @@ function updateModalScore() {
   updateBasicScore7();
 }
 
-function saveEval(id) {
-  const a = SAMPLE_APPLICANTS.find(x => x.id === id);
+async function saveEval(id) {
+  const a = getApplicants().find(x => x.id === id);
   if (!a) return;
-  a.ratings = { ...currentRatings };
-  const vals = Object.values(currentRatings);
-  a.total = vals.length > 0 ? vals.reduce((s, v) => s + v, 0) / vals.length : 0;
+
+  // 메모리 즉시 반영
+  a.ratings      = { ...currentRatings };
+  const vals     = Object.values(currentRatings);
+  a.total        = vals.length > 0 ? vals.reduce((s,v) => s+v, 0) / vals.length : 0;
   a.basicRatings = { ...currentBasicRatings };
-  const bvals = Object.values(currentBasicRatings);
-  a.basicTotal = bvals.length > 0 ? bvals.reduce((s, v) => s + v, 0) / bvals.length : 0;
+  const bvals    = Object.values(currentBasicRatings);
+  a.basicTotal   = bvals.length > 0 ? bvals.reduce((s,v) => s+v, 0) / bvals.length : 0;
+
+  // Supabase 저장 (연결된 경우)
+  if (_supabase && currentUser) {
+    try {
+      const { data: co } = await _supabase.from('companies')
+        .select('id').eq('user_id', currentUser.id).single();
+      if (co) {
+        // 지원자의 job_seeker_id 조회 (applications 테이블 기준)
+        const { data: app } = await _supabase.from('applications')
+          .select('job_seeker_id').eq('id', id).single();
+
+        const payload = {
+          application_id: id,
+          company_id:     co.id,
+          job_seeker_id:  app?.job_seeker_id || null,
+          ncs_ratings:    a.ratings,
+          ncs_total:      parseFloat(a.total.toFixed(2)),
+          basic_ratings:  a.basicRatings,
+          basic_total:    parseFloat(a.basicTotal.toFixed(2)),
+          evaluated_by:   currentUser.id,
+          updated_at:     new Date().toISOString()
+        };
+
+        const { error } = await _supabase.from('evaluations')
+          .upsert(payload, { onConflict: 'application_id' });
+        if (error) console.error('평가 저장 오류:', error.message);
+        else showToast('✅ 평가가 DB에 저장되었습니다.', 'success');
+        return;
+      }
+    } catch (err) {
+      console.error('saveEval 오류:', err);
+    }
+  }
   showToast('직무역량 + 직업공통능력 평가가 저장되었습니다.', 'success');
 }
 
-function setStatus(id, status) {
-  const a = SAMPLE_APPLICANTS.find(x => x.id === id);
+async function setStatus(id, status) {
+  // 메모리 즉시 반영
+  const a = getApplicants().find(x => x.id === id);
   if (a) a.status = status;
+
+  // Supabase 업데이트 (연결된 경우)
+  if (_supabase) {
+    try {
+      const { error } = await _supabase.from('applications')
+        .update({ status, updated_at: new Date().toISOString() }).eq('id', id);
+      if (error) console.error('상태 업데이트 오류:', error.message);
+    } catch (err) {
+      console.error('setStatus 오류:', err);
+    }
+  }
+
   closeModal('modal-applicant');
   renderApplicantList();
-  showToast(STATUS_MAP[status].label + ' 처리되었습니다.', 'success');
+  // 대시보드 카드 새로고침 (합격/불합격 카운트 반영)
+  if (_supabase && currentUser) {
+    loadDashboardData().then(d => {
+      _dashData = d;
+      const g = id => document.getElementById(id);
+      if (g('dash-final-passed')) g('dash-final-passed').textContent = d.finalPassed;
+    });
+  }
+  showToast((STATUS_MAP[status]||{label:status}).label + ' 처리되었습니다.', 'success');
 }
 
 // RESULTS
 function renderResults() {
   const el = document.getElementById('results-content');
-  const evaluated = SAMPLE_APPLICANTS.filter(a => a.total > 0);
+  const ALL = getApplicants();
+  const evaluated = ALL.filter(a => a.total > 0);
   const sorted = [...evaluated].sort((a, b) => b.total - a.total);
+  const totalCount = ALL.length || 1;
 
   // tabs: 직무역량 / 기초역량 / 종합
   el.innerHTML = `
     <div style="margin-bottom: 20px;">
       <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-        <div style="font-size: 13px; color: var(--gray-500);">평가 완료 ${evaluated.length}명 / 전체 ${SAMPLE_APPLICANTS.length}명</div>
+        <div style="font-size: 13px; color: var(--gray-500);">평가 완료 ${evaluated.length}명 / 전체 ${ALL.length}명</div>
         <div style="display:flex; gap:8px;">
           <span class="badge badge-blue">직무역량: 5점 척도</span>
           <span class="badge badge-purple">직업공통능력: 7점 척도</span>
         </div>
       </div>
       <div class="progress-bar" style="height: 10px;">
-        <div class="progress-fill" style="width: ${(evaluated.length/SAMPLE_APPLICANTS.length)*100}%;"></div>
+        <div class="progress-fill" style="width: ${(evaluated.length/totalCount)*100}%;"></div>
       </div>
     </div>
     <div class="tabs" id="result-tabs">
