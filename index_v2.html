@@ -974,6 +974,7 @@ textarea { resize: vertical; min-height: 100px; font-family: inherit; }
   </a>
   <div class="nav-links">
     <button class="nav-btn active" id="nav-home" onclick="showPage('home')">홈</button>
+    <button class="nav-btn" id="nav-jobs" onclick="showPage('jobs')">채용공고</button>
     <button class="nav-btn" id="nav-company" onclick="showPage('company')">기업 포털</button>
     <button class="nav-btn" id="nav-seeker" onclick="showPage('seeker')">구직자 포털</button>
     <button class="nav-btn outline" id="btn-login" onclick="openLoginModal()">로그인</button>
@@ -1043,6 +1044,41 @@ textarea { resize: vertical; min-height: 100px; font-family: inherit; }
         <div style="opacity: 0.8; font-size: 14px; margin-top: 4px;">매칭 만족도</div>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- ===== JOBS PAGE ===== -->
+<div class="page" id="page-jobs">
+  <div style="background: linear-gradient(135deg, #1e40af 0%, #2563eb 60%, #0ea5e9 100%); padding: 40px 32px; color:#fff;">
+    <div style="max-width:900px; margin:0 auto;">
+      <h2 style="font-size:28px; font-weight:800; margin-bottom:8px;">채용공고 탐색</h2>
+      <p style="opacity:0.85; margin-bottom:24px;">NCS 직무 기반 채용 공고를 검색하고 바로 지원하세요.</p>
+      <div style="display:flex; gap:12px; flex-wrap:wrap;">
+        <input type="text" id="jobs-search" placeholder="직무명, 기업명 검색..." oninput="filterJobs()"
+          style="flex:1; min-width:200px; padding:12px 16px; border-radius:10px; border:none; font-size:14px; outline:none; box-shadow:0 2px 8px rgba(0,0,0,0.15);">
+        <select id="jobs-ncs-filter" onchange="filterJobs()"
+          style="padding:12px 14px; border-radius:10px; border:none; font-size:14px; background:#fff; cursor:pointer; min-width:150px;">
+          <option value="">전체 직무</option>
+        </select>
+        <select id="jobs-type-filter" onchange="filterJobs()"
+          style="padding:12px 14px; border-radius:10px; border:none; font-size:14px; background:#fff; cursor:pointer;">
+          <option value="">고용형태 전체</option>
+          <option value="정규직">정규직</option>
+          <option value="계약직">계약직</option>
+          <option value="인턴">인턴</option>
+        </select>
+      </div>
+    </div>
+  </div>
+  <div style="max-width:900px; margin:0 auto; padding:32px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+      <div id="jobs-count" style="font-size:14px; color:var(--gray-500);"></div>
+      <div style="display:flex; gap:8px;">
+        <button class="btn btn-sm" id="sort-latest" onclick="sortJobs('latest')" style="background:var(--primary);color:#fff;">최신순</button>
+        <button class="btn btn-sm" id="sort-popular" onclick="sortJobs('popular')" style="background:var(--gray-100);color:var(--gray-700);">지원자 많은순</button>
+      </div>
+    </div>
+    <div id="jobs-list"></div>
   </div>
 </div>
 
@@ -1295,6 +1331,7 @@ textarea { resize: vertical; min-height: 100px; font-family: inherit; }
         <div class="panel">
           <div class="panel-header">
             <div class="panel-title">평가 결과 현황</div>
+            <button class="btn btn-sm btn-success" onclick="exportResultsCSV()">⬇ CSV 내보내기</button>
           </div>
           <div id="results-content"></div>
         </div>
@@ -1834,6 +1871,7 @@ function showPage(page) {
   const navBtn = document.getElementById('nav-' + page);
   if (navBtn) navBtn.classList.add('active');
   if (page === 'company') { showCompanySection('dashboard'); }
+  if (page === 'jobs') { initJobsPage(); }
 }
 
 // ===================== NCS GRID =====================
@@ -2373,11 +2411,17 @@ function renderApplicantList() {
           <span style="font-size:13px;color:var(--gray-400);">${a.date} 지원</span>
         </div>
       </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        ${a.total > 0
-          ? `<span style="font-size:20px;font-weight:800;color:var(--primary);">${a.total.toFixed(1)}</span><span style="font-size:12px;color:var(--gray-400);">/5</span>`
-          : '<span style="font-size:13px;color:var(--gray-400);">미평가</span>'}
-        <button class="btn btn-sm btn-blue" style="margin-left:8px;" onclick="event.stopPropagation(); openApplicantEval(${a.id})">평가하기</button>
+      <div style="display:flex;align-items:center;gap:10px;">
+        ${(() => {
+          const match = calcMatchScore(a);
+          if (match === null) return '<span style="font-size:13px;color:var(--gray-400);">미평가</span>';
+          const color = match >= 75 ? 'var(--success)' : match >= 55 ? 'var(--primary)' : 'var(--danger)';
+          return `<div style="text-align:center;">
+            <div style="font-size:18px;font-weight:900;color:${color};">${match}%</div>
+            <div style="font-size:10px;color:var(--gray-400);">매칭점수</div>
+          </div>`;
+        })()}
+        <button class="btn btn-sm btn-blue" onclick="event.stopPropagation(); openApplicantEval(${a.id})">평가하기</button>
       </div>
     </div>
   `).join('');
@@ -3351,7 +3395,180 @@ document.getElementById('modal-payment').addEventListener('click', function(e) {
   if (e.target === this) closeModal('modal-payment');
 });
 
+// ===================== LOCALSTORAGE 영속성 =====================
+const LS_KEY = 'ncs_app_data';
+
+function saveToStorage() {
+  try {
+    const data = {
+      applicants: SAMPLE_APPLICANTS,
+      timestamp: Date.now()
+    };
+    localStorage.setItem(LS_KEY, JSON.stringify(data));
+  } catch(e) { console.warn('LocalStorage 저장 실패:', e); }
+}
+
+function loadFromStorage() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (data.applicants && Array.isArray(data.applicants)) {
+      data.applicants.forEach(saved => {
+        const idx = SAMPLE_APPLICANTS.findIndex(a => a.id === saved.id);
+        if (idx !== -1) Object.assign(SAMPLE_APPLICANTS[idx], saved);
+      });
+    }
+  } catch(e) { console.warn('LocalStorage 로드 실패:', e); }
+}
+
+// saveEval/setStatus 호출 시 자동 저장 — 기존 함수 래핑
+const _origSaveEval = saveEval;
+saveEval = async function(id) {
+  await _origSaveEval(id);
+  saveToStorage();
+};
+
+const _origSetStatus = setStatus;
+setStatus = async function(id, status) {
+  await _origSetStatus(id, status);
+  saveToStorage();
+};
+
+// ===================== CSV 내보내기 =====================
+function exportResultsCSV() {
+  const ALL = getApplicants();
+  const evaluated = ALL.filter(a => a.total > 0 || a.basicTotal > 0);
+  if (!evaluated.length) { showToast('내보낼 평가 데이터가 없습니다.', 'error'); return; }
+
+  const headers = ['이름', 'NCS분야', '능력단위', '지원일', '상태',
+    ...evalCriteriaList.map(c => `직무역량-${c}`),
+    'NCS직무역량평균(/5)',
+    ...BASIC_COMPETENCIES.map(c => `직업공통-${c.name}`),
+    '직업공통능력평균(/7)', '종합환산점수(/100)'];
+
+  const rows = evaluated
+    .map(a => ({ ...a, combined: ((a.total/5)*60 + (a.basicTotal/7)*40) }))
+    .sort((a, b) => b.combined - a.combined)
+    .map(a => [
+      a.name, a.ncs, a.unit, a.date, (STATUS_MAP[a.status]||{label:a.status}).label,
+      ...evalCriteriaList.map((_, i) => a.ratings[i] || 0),
+      a.total.toFixed(2),
+      ...BASIC_COMPETENCIES.map(c => a.basicRatings[c.id] || 0),
+      a.basicTotal.toFixed(2),
+      a.combined.toFixed(1)
+    ]);
+
+  const csv = [headers, ...rows].map(r => r.map(v => `"${v}"`).join(',')).join('\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `NCS평가결과_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('CSV 파일이 다운로드되었습니다!', 'success');
+}
+
+// ===================== 채용공고 탐색 =====================
+const JOB_LISTINGS = [
+  { id: 1, title: '소프트웨어 개발자 (백엔드)', company: '㈜테크코리아', ncs: '정보통신', unit: '소프트웨어개발', type: '정규직', location: '서울 강남구', salary: '4,000만원~', applicants: 67, deadline: '2026.06.18', desc: 'Node.js/Python 백엔드 개발 및 RESTful API 설계', hot: true },
+  { id: 2, title: '데이터 분석가', company: '㈜테크코리아', ncs: '정보통신', unit: '데이터분석', type: '정규직', location: '서울 강남구', salary: '3,500만원~', applicants: 43, deadline: '2026.06.25', desc: 'Python, SQL 기반 데이터 분석 및 시각화', hot: false },
+  { id: 3, title: '경영기획 담당자', company: '㈜코리아홀딩스', ncs: '경영·회계·사무', unit: '경영기획', type: '정규직', location: '서울 종로구', salary: '3,200만원~', applicants: 28, deadline: '2026.05.31', desc: '전략기획, 사업계획 수립 및 경영 성과 관리', hot: false },
+  { id: 4, title: 'UI/UX 디자이너', company: '㈜크리에이티브랩', ncs: '문화·예술·디자인', unit: 'UI/UX디자인', type: '계약직', location: '서울 마포구', salary: '3,000만원~', applicants: 51, deadline: '2026.06.10', desc: 'Figma 기반 UI/UX 설계 및 프로토타이핑', hot: true },
+  { id: 5, title: '재무회계 담당자', company: '㈜파이낸스그룹', ncs: '금융·보험', unit: '투자운용', type: '정규직', location: '서울 여의도', salary: '3,800만원~', applicants: 19, deadline: '2026.07.01', desc: '재무제표 분석, 세무신고, 원가관리', hot: false },
+  { id: 6, title: '생산관리 엔지니어', company: '㈜제조코리아', ncs: '생산관리', unit: '공정관리', type: '정규직', location: '경기 안산시', salary: '3,500만원~', applicants: 22, deadline: '2026.06.20', desc: 'MES 시스템 운영, 공정 이상 분석 및 개선', hot: false },
+  { id: 7, title: 'AI/ML 엔지니어', company: '㈜에이아이랩', ncs: '정보통신', unit: 'AI/ML', type: '정규직', location: '서울 성수동', salary: '5,000만원~', applicants: 89, deadline: '2026.06.30', desc: 'PyTorch 기반 모델 개발, MLOps 파이프라인 구축', hot: true },
+  { id: 8, title: '보건의료 코디네이터', company: '㈜메디케어', ncs: '보건·의료', unit: '간호', type: '정규직', location: '서울 송파구', salary: '2,800만원~', applicants: 14, deadline: '2026.06.15', desc: '환자 관리, 의료 코디네이션 및 상담 업무', hot: false },
+];
+
+let _jobsSortMode = 'latest';
+
+function initJobsPage() {
+  const sel = document.getElementById('jobs-ncs-filter');
+  if (!sel) return;
+  const cats = [...new Set(JOB_LISTINGS.map(j => j.ncs))];
+  sel.innerHTML = '<option value="">전체 직무</option>' + cats.map(c => `<option value="${c}">${c}</option>`).join('');
+  filterJobs();
+}
+
+function filterJobs() {
+  const keyword = (document.getElementById('jobs-search')?.value || '').toLowerCase();
+  const ncs = document.getElementById('jobs-ncs-filter')?.value || '';
+  const type = document.getElementById('jobs-type-filter')?.value || '';
+
+  let list = JOB_LISTINGS.filter(j => {
+    const matchKeyword = !keyword || j.title.toLowerCase().includes(keyword) || j.company.toLowerCase().includes(keyword) || j.unit.toLowerCase().includes(keyword);
+    const matchNcs = !ncs || j.ncs === ncs;
+    const matchType = !type || j.type === type;
+    return matchKeyword && matchNcs && matchType;
+  });
+
+  if (_jobsSortMode === 'popular') list = [...list].sort((a, b) => b.applicants - a.applicants);
+
+  const countEl = document.getElementById('jobs-count');
+  if (countEl) countEl.textContent = `총 ${list.length}개의 공고`;
+  renderJobListings(list);
+}
+
+function sortJobs(mode) {
+  _jobsSortMode = mode;
+  document.getElementById('sort-latest').style.cssText = mode === 'latest' ? 'background:var(--primary);color:#fff;' : 'background:var(--gray-100);color:var(--gray-700);';
+  document.getElementById('sort-popular').style.cssText = mode === 'popular' ? 'background:var(--primary);color:#fff;' : 'background:var(--gray-100);color:var(--gray-700);';
+  filterJobs();
+}
+
+function renderJobListings(list) {
+  const el = document.getElementById('jobs-list');
+  if (!el) return;
+  if (!list.length) {
+    el.innerHTML = '<div style="text-align:center;padding:60px;color:var(--gray-400);"><div style="font-size:40px;margin-bottom:12px;">🔍</div><div>검색 결과가 없습니다.</div></div>';
+    return;
+  }
+  el.innerHTML = list.map(j => `
+    <div class="card" style="margin-bottom:16px; cursor:pointer; position:relative;" onclick="applyToJob(${j.id})">
+      ${j.hot ? '<div style="position:absolute;top:16px;right:16px;background:#ef4444;color:#fff;font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;">🔥 HOT</div>' : ''}
+      <div style="display:flex; align-items:flex-start; gap:16px;">
+        <div style="width:48px;height:48px;border-radius:12px;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;">🏢</div>
+        <div style="flex:1;">
+          <div style="font-size:17px;font-weight:700;color:var(--gray-900);margin-bottom:4px;">${j.title}</div>
+          <div style="font-size:13px;color:var(--gray-500);margin-bottom:10px;">${j.company} · ${j.location}</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+            <span class="badge badge-blue">${j.ncs}</span>
+            <span class="badge badge-purple">${j.unit}</span>
+            <span class="badge badge-amber">${j.type}</span>
+            <span class="badge" style="background:#f0fdf4;color:#166534;">💰 ${j.salary}</span>
+          </div>
+          <div style="font-size:13px;color:var(--gray-600);margin-bottom:12px;">${j.desc}</div>
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div style="font-size:12px;color:var(--gray-400);">
+              📅 마감 ${j.deadline} &nbsp;·&nbsp; 👥 지원자 ${j.applicants}명
+            </div>
+            <button class="btn btn-blue btn-sm" onclick="event.stopPropagation(); applyToJob(${j.id})">지원하기</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function applyToJob(id) {
+  const job = JOB_LISTINGS.find(j => j.id === id);
+  if (!job) return;
+  showPage('seeker');
+  showToast(`"${job.title}" 공고에 지원합니다. 이력서를 작성해주세요.`, 'success');
+}
+
+// ===================== 매칭 점수 (지원자 목록) =====================
+function calcMatchScore(applicant) {
+  const ncsScore = applicant.total > 0 ? (applicant.total / 5) * 100 : 0;
+  const basicScore = applicant.basicTotal > 0 ? (applicant.basicTotal / 7) * 100 : 0;
+  if (applicant.total === 0 && applicant.basicTotal === 0) return null;
+  return Math.round((ncsScore * 0.6) + (basicScore * 0.4));
+}
+
 // ===================== INIT =====================
+loadFromStorage();
 renderNCSGrid('home-ncs-grid', null, true);
 
 // Home NCS chips navigate to seeker
